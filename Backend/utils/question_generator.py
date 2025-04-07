@@ -1,31 +1,31 @@
 import requests
 import json
 import uuid
-from firebase_config import db
 import re
+from firebase_config import db
+from firebase_admin import firestore
 
 def generate_questions(text, user_id, file_id):
-    # Construct prompt for the LLM
     prompt = f"""
-Generate 10 multiple-choice questions (MCQs) from the following text.
-Each question should have 4 options and a correct answer.
+Generate 10 multiple-choice questions (MCQs) AND flashcards from the following text.
 
-Respond ONLY in direct JSON format do not give any unnecessary text:
-```
-[
-  {{
-    "question": "Your question",
-    "options": ["option 1", "option 2", "option 3", "option 4"],
-    "correct_answer": <option number starting from 1>
-  }},
-  ```
-]
+Each question should have:
+- 4 options
+- A correct answer (as an index 1–4)
+
+Each flashcard should be a simplified question – answer pair (front/back) based on the content.
+
+Respond ONLY in direct JSON format, like this:
+[ {{ "question": "Your question", "options": ["option 1", "option 2", "option 3", "option 4"], "correct_answer": <option number starting from 1> }} ]
+
+rust
+Copy
+Edit
 
 Text:
 {text}
 """
 
-    # API request to OpenRouter
     try:
         response = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
@@ -40,44 +40,34 @@ Text:
         )
 
         if response.status_code != 200:
-            print(f"Error {response.status_code}: {response.text}")
             return [], f"API request failed with status code {response.status_code}"
 
-        
         result = response.json()
         generated_text = result['choices'][0]['message']['content'].strip()
-        print("Raw response from model:\n", generated_text)
-        
+
     except Exception as e:
-        print("Exception during API call:", e)
         return {"error": "Failed to call the question generation API"}, 500
 
-    # Strip markdown if present
     match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", generated_text, re.DOTALL)
-
-    if match:
-        clean_json = match.group(1)
-
-    else:
-        clean_json = generated_text
+    clean_json = match.group(1) if match else generated_text
 
     try:
         questions_raw = json.loads(clean_json)
     except Exception as e:
-        print("JSON parsing error:", e)
-        print("Final text passed to json.loads:\n", clean_json)
         return {"error": "Failed to parse questions"}, 500
 
     questions = []
+    flashcards = []
 
     for q in questions_raw:
         try:
             question_text = q['question'].strip()
             options = q['options']
-            correct_index = int(q['correct_answer']) - 1  # Convert to 0-based index
-
+            correct_index = int(q['correct_answer']) - 1
             if correct_index < 0 or correct_index >= len(options):
                 continue
+
+            correct_answer = options[correct_index]
 
             question_data = {
                 "fileId": file_id,
@@ -85,7 +75,7 @@ Text:
                 "questionText": question_text,
                 "type": "mcq",
                 "options": options,
-                "correctAnswer": options[correct_index],
+                "correctAnswer": correct_answer,
                 "userAnswer": "",
                 "isCorrect": False,
                 "answeredAt": None
@@ -94,13 +84,23 @@ Text:
             question_id = str(uuid.uuid4())
             db.collection("questions").document(question_id).set(question_data)
             questions.append(question_data)
-
-            print(f"Uploaded question: {question_text}")
+            flashcards.append({"front": question_text, "back": correct_answer})
 
         except Exception as e:
-            print("Skipping invalid question format:", e)
+            continue
 
     if not questions:
         return {"error": "No valid questions could be parsed from the response"}, 500
 
-    return {"questions": questions}, 200
+    store_flashcards(flashcards, user_id, file_id)
+    return {"questions": questions, "flashcards": flashcards}, 200
+
+def store_flashcards(flashcards, user_id, file_id):
+    for card in flashcards:
+        db.collection("flashcards").add({
+            "front": card["front"],
+            "back": card["back"],
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "userId": user_id,
+            "fileId": file_id
+        })
