@@ -3,12 +3,13 @@ import { initializeApp } from "firebase/app"
 import { getFirestore } from "firebase/firestore"
 
 const firebaseConfig = {
-  apiKey: "your-api-key",
-  authDomain: "your-auth-domain",
-  projectId: "your-project-id",
-  storageBucket: "your-storage-bucket",
-  messagingSenderId: "your-messaging-sender-id",
-  appId: "your-app-id",
+  apiKey: "AIzaSyBckkUnC86zEdaNvXqYha1Ir0xcFguqkdg",
+  authDomain: "study-buddy-63a7a.firebaseapp.com",
+  projectId: "study-buddy-63a7a",
+  storageBucket: "study-buddy-63a7a.firebasestorage.app",
+  messagingSenderId: "22115081290",
+  appId: "1:22115081290:web:2ae0b693eec86d37cc5ab3",
+  measurementId: "G-FHK764XYRQ",
 }
 
 const app = initializeApp(firebaseConfig)

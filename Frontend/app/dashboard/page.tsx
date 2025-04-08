@@ -1,6 +1,6 @@
 "use client"
 import * as React from "react"
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import {
   FileText,
   History,
@@ -29,8 +29,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
-// Import Firebase/Firestore (assuming you have it set up)
-import { db } from "@/lib/firebase" // Adjust path to your Firebase config
+import { db } from "@/lib/firebase"
 import { collection, addDoc } from "firebase/firestore"
 
 export default function Dashboard() {
@@ -45,7 +44,13 @@ export default function Dashboard() {
     difficulty: 50,
     numQuestions: "10",
   })
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [isUploading, setIsUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [generatedQuestions, setGeneratedQuestions] = useState<any[]>([])
+  const [generatedFlashcards, setGeneratedFlashcards] = useState<any[]>([])
+  const [userAnswers, setUserAnswers] = useState<{ [key: number]: string }>({})
+  const [knownFlashcards, setKnownFlashcards] = useState<boolean[]>([])
 
   const flashcards = [
     {
@@ -62,7 +67,14 @@ export default function Dashboard() {
     },
   ]
 
-  // Drag and Drop Handlers
+  useEffect(() => {
+    setKnownFlashcards(new Array(generatedFlashcards.length).fill(false))
+  }, [generatedFlashcards])
+
+  useEffect(() => {
+    console.log("Current generatedFlashcards in state:", generatedFlashcards)
+  }, [generatedFlashcards])
+
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     setIsDragging(true)
@@ -94,7 +106,6 @@ export default function Dashboard() {
     fileInputRef.current?.click()
   }
 
-  // Update question preferences
   const updateQuestionTypes = (type: string, checked: boolean) => {
     setQuestionPrefs((prev) => ({
       ...prev,
@@ -115,34 +126,95 @@ export default function Dashboard() {
     formData.append("numQuestions", questionPrefs.numQuestions)
 
     try {
-      // Replace with your actual backend endpoint
-      const response = await fetch("/api/generate-questions", {
+      setIsUploading(true)
+      setUploadProgress(0)
+
+      const response = await fetch("http://localhost:5000/generate-questions", {
         method: "POST",
         body: formData,
       })
 
-      if (!response.ok) throw new Error("Failed to generate questions")
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error("Backend error response:", errorText)
+        throw new Error("Failed to generate questions")
+      }
 
-      const { questions } = await response.json()
+      const { questions, flashcards } = await response.json()
+      console.log("Backend response:", JSON.stringify({ questions, flashcards }, null, 2))
 
-      // Store questions in Firestore
       const questionsCollection = collection(db, "generatedQuestions")
-      await Promise.all(
-        questions.map((q: any) =>
-          addDoc(questionsCollection, {
-            question: q.question,
-            type: q.type,
+      let completed = 0
+
+      const validQuestions = questions.filter(q => {
+        if (!q.correctAnswer || typeof q.correctAnswer !== "string") {
+          console.warn("Invalid question object:", q)
+          return false
+        }
+        return true
+      })
+
+      for (const q of validQuestions) {
+        try {
+          await addDoc(questionsCollection, {
+            question: q.correctAnswer,
+            type: q.type || "unknown",
             difficulty: questionPrefs.difficulty,
             createdAt: new Date(),
           })
-        )
-      )
+          completed++
+          setUploadProgress(Math.round((completed / validQuestions.length) * 100))
+        } catch (firestoreError) {
+          console.error("Firestore write error:", firestoreError)
+        }
+      }
 
+      setGeneratedQuestions(validQuestions)
+      console.log("Set generatedQuestions:", validQuestions)
+
+      const validFlashcards = flashcards.map(f => ({
+        front: f.front || "No front text",
+        back: f.back || "No back text",
+      }))
+      setGeneratedFlashcards(validFlashcards)
+      console.log("Set generatedFlashcards:", validFlashcards)
+
+      setIsUploading(false)
       alert("Questions generated and stored successfully!")
     } catch (error) {
       console.error("Error generating questions:", error)
-      alert("An error occurred while generating questions.")
+      setIsUploading(false)
+      alert(`An error occurred: ${error.message}. Check console for details.`)
     }
+  }
+
+  const handleAnswerSelect = (questionIdx: number, answer: string) => {
+    setUserAnswers((prev) => ({
+      ...prev,
+      [questionIdx]: answer,
+    }))
+  }
+
+  const handleKnow = () => {
+    setKnownFlashcards((prev) => {
+      const newKnown = [...prev]
+      newKnown[currentFlashcard] = true
+      return newKnown
+    })
+  }
+
+  const handleDontKnow = () => {
+    setKnownFlashcards((prev) => {
+      const newKnown = [...prev]
+      newKnown[currentFlashcard] = false
+      return newKnown
+    })
+  }
+
+  const calculateProgress = () => {
+    if (generatedFlashcards.length === 0) return 0
+    const knownCount = knownFlashcards.filter(Boolean).length
+    return Math.round((knownCount / generatedFlashcards.length) * 100)
   }
 
   return (
@@ -312,6 +384,50 @@ export default function Dashboard() {
                     <Button className="w-full" onClick={handleGenerateQuestions}>
                       Generate Questions
                     </Button>
+
+                    {generatedQuestions.length > 0 && (
+                      <div className="mt-6">
+                        <h3 className="text-lg font-semibold">Generated Questions</h3>
+                        <div className="space-y-4 mt-2">
+                          {generatedQuestions.map((q, idx) => (
+                            <div key={idx} className="p-4 bg-white rounded-lg shadow-sm">
+                              <p className="text-sm text-slate-700 mb-2">
+                                {idx + 1}. {q.questionText}
+                              </p>
+                              {q.options && q.options.length > 0 ? (
+                                <div className="space-y-2">
+                                  {q.options.map((option: string, optIdx: number) => (
+                                    <div key={optIdx} className="flex items-center space-x-2">
+                                      <Checkbox
+                                        id={`q${idx}-opt${optIdx}`}
+                                        checked={userAnswers[idx] === option}
+                                        onCheckedChange={(checked) =>
+                                          checked && handleAnswerSelect(idx, option)
+                                        }
+                                      />
+                                      <label
+                                        htmlFor={`q${idx}-opt${optIdx}`}
+                                        className="text-sm text-slate-600"
+                                      >
+                                        {option}
+                                      </label>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-sm text-slate-500">No options available</p>
+                              )}
+                              {userAnswers[idx] && (
+                                <p className="text-sm mt-2">
+                                  Your answer: {userAnswers[idx]} 
+                                  {userAnswers[idx] === q.correctAnswer ? " (Correct)" : " (Incorrect)"}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -338,49 +454,79 @@ export default function Dashboard() {
               </div>
 
               <div className="flex flex-col items-center">
-                <div className="relative w-full max-w-md h-64 perspective">
-                  <div
-                    className={`absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer ${flipped ? "rotate-y-180" : ""}`}
-                    onClick={() => setFlipped(!flipped)}
-                  >
-                    <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
-                      <div className="text-sm text-slate-500 mb-2">Front</div>
-                      <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
-                        {flashcards[currentFlashcard].front}
-                      </div>
-                      <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
-                    </div>
+                {generatedFlashcards.length > 0 ? (
+                  <>
+                    <div className="relative w-full max-w-md h-64 perspective">
+                      <div
+                        className={`absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer ${flipped ? "rotate-y-180" : ""}`}
+                        onClick={() => setFlipped(!flipped)}
+                      >
+                        <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
+                          <div className="text-sm text-slate-500 mb-2">Front</div>
+                          <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
+                            {generatedFlashcards[currentFlashcard].front}
+                          </div>
+                          <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                        </div>
 
-                    <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
-                      <div className="text-sm text-slate-500 mb-2">Back</div>
-                      <div className="flex-1 flex items-center justify-center text-lg text-center">
-                        {flashcards[currentFlashcard].back}
+                        <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
+                          <div className="text-sm text-slate-500 mb-2">Back</div>
+                          <div className="flex-1 flex items-center justify-center text-lg text-center">
+                            {generatedFlashcards[currentFlashcard].back}
+                          </div>
+                          <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                        </div>
                       </div>
-                      <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                    </div>
+                    <p className="text-sm text-slate-500 mt-4">
+                      Card {currentFlashcard + 1} of {generatedFlashcards.length}
+                    </p>
+                  </>
+                ) : (
+                  <div className="relative w-full max-w-md h-64 perspective">
+                    <div
+                      className={`absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer ${flipped ? "rotate-y-180" : ""}`}
+                      onClick={() => setFlipped(!flipped)}
+                    >
+                      <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
+                        <div className="text-sm text-slate-500 mb-2">Front</div>
+                        <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
+                          {flashcards[currentFlashcard].front}
+                        </div>
+                        <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                      </div>
+
+                      <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
+                        <div className="text-sm text-slate-500 mb-2">Back</div>
+                        <div className="flex-1 flex items-center justify-center text-lg text-center">
+                          {flashcards[currentFlashcard].back}
+                        </div>
+                        <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
 
                 <div className="flex gap-4 mt-8">
                   <Button variant="outline" onClick={() => {
                     setFlipped(false)
-                    setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : flashcards.length - 1))
+                    setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : (generatedFlashcards.length > 0 ? generatedFlashcards.length - 1 : flashcards.length - 1)))
                   }}>
                     Previous
                   </Button>
                   <Button variant="outline" onClick={() => {
                     setFlipped(false)
-                    setCurrentFlashcard((prev) => (prev < flashcards.length - 1 ? prev + 1 : 0))
+                    setCurrentFlashcard((prev) => (prev < (generatedFlashcards.length > 0 ? generatedFlashcards.length - 1 : flashcards.length - 1) ? prev + 1 : 0))
                   }}>
                     Next
                   </Button>
                 </div>
 
                 <div className="flex gap-4 mt-4">
-                  <Button variant="outline" size="sm" className="gap-1">
+                  <Button variant="outline" size="sm" className="gap-1" onClick={handleDontKnow}>
                     <X className="h-4 w-4" /> Don't Know
                   </Button>
-                  <Button variant="outline" size="sm" className="gap-1">
+                  <Button variant="outline" size="sm" className="gap-1" onClick={handleKnow}>
                     <CheckCircle className="h-4 w-4" /> Know
                   </Button>
                 </div>
@@ -388,9 +534,11 @@ export default function Dashboard() {
                 <div className="w-full max-w-md mt-6">
                   <div className="flex justify-between text-sm mb-1">
                     <span>Progress</span>
-                    <span>2/10 cards</span>
+                    <span>
+                      {knownFlashcards.filter(Boolean).length}/{generatedFlashcards.length || flashcards.length} cards
+                    </span>
                   </div>
-                  <Progress value={20} />
+                  <Progress value={calculateProgress()} />
                 </div>
               </div>
             </div>
