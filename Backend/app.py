@@ -65,10 +65,13 @@ def generate_questions_endpoint():
 
         logger.info(f"Extracted text (first 100 chars): {text[:100]}")
 
+        question_type = request.form.get("questionType", "Multiple Choice")
+        difficulty = request.form.get("difficulty", "Medium")
+        num_questions = request.form.get("numQuestions", "10")
         user_id = request.form.get("userId", "dummy_user_id")
-        file_id = request.form.get("fileId", "dummy_file_id")
+        file_id = file.filename
 
-        result, status_code = generate_questions(text, user_id, file_id)
+        result, status_code = generate_questions(text, user_id, file_id, question_type, difficulty, num_questions)
         if status_code != 200:
             logger.error(f"generate_questions failed with status {status_code}: {result}")
             return jsonify(result), status_code
@@ -78,12 +81,7 @@ def generate_questions_endpoint():
 
     except Exception as e:
         logger.error(f"Unexpected error in generate_questions_endpoint: {str(e)}", exc_info=True)
-        # Fallback response for testing
-        fallback_result = {
-            "questions": [{"correctAnswer": "Fallback Q", "options": ["A", "B", "C", "D"]}],
-            "flashcards": [{"front": "Fallback Front", "back": "Fallback Back"}]
-        }
-        return jsonify(fallback_result), 200  # Return 200 to test frontend
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 @app.route('/flashcards', methods=['POST'])
 def create_flashcard():

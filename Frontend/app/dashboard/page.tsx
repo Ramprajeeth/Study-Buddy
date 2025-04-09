@@ -5,8 +5,6 @@ import {
   FileText,
   History,
   Home,
-  HelpCircle,
-  Info,
   LogOut,
   Upload,
   CheckCircle,
@@ -14,6 +12,8 @@ import {
   ChevronRight,
   ChevronLeft,
   BarChart2,
+  Loader2,
+  Trash2,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -29,8 +29,9 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
+import { Input } from "@/components/ui/input"
 import { db } from "@/lib/firebase"
-import { collection, addDoc } from "firebase/firestore"
+import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc } from "firebase/firestore"
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState("generate")
@@ -40,32 +41,24 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [questionPrefs, setQuestionPrefs] = useState({
-    types: [] as string[],
-    difficulty: 50,
+    type: "Multiple Choice",
+    difficulty: "Medium",
     numQuestions: "10",
   })
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isUploading, setIsUploading] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [generatedQuestions, setGeneratedQuestions] = useState<any[]>([])
   const [generatedFlashcards, setGeneratedFlashcards] = useState<any[]>([])
   const [userAnswers, setUserAnswers] = useState<{ [key: number]: string }>({})
   const [knownFlashcards, setKnownFlashcards] = useState<boolean[]>([])
-
-  const flashcards = [
-    {
-      front: "What is Git?",
-      back: "Git is a distributed version control system for tracking changes in source code during software development.",
-    },
-    {
-      front: "What is a commit in Git?",
-      back: "A commit is a snapshot of your repository at a specific point in time.",
-    },
-    {
-      front: "What is the purpose of branching in Git?",
-      back: "Branching allows you to diverge from the main line of development and continue to work without messing with the main line.",
-    },
-  ]
+  const [currentQuizQuestion, setCurrentQuizQuestion] = useState(0)
+  const [quizSubmitted, setQuizSubmitted] = useState(false)
+  const [quizHistory, setQuizHistory] = useState<any[]>([])
+  const [selectedTopic, setSelectedTopic] = useState<string>("")
+  const [viewingQuiz, setViewingQuiz] = useState<any | null>(null)
+  const [topicFlashcards, setTopicFlashcards] = useState<{ [key: string]: any[] }>({})
 
   useEffect(() => {
     setKnownFlashcards(new Array(generatedFlashcards.length).fill(false))
@@ -73,7 +66,55 @@ export default function Dashboard() {
 
   useEffect(() => {
     console.log("Current generatedFlashcards in state:", generatedFlashcards)
+    fetchQuizHistory()
+    fetchFlashcards()
   }, [generatedFlashcards])
+
+  const fetchQuizHistory = async () => {
+    try {
+      const q = query(collection(db, "quizHistory"), orderBy("submittedAt", "desc"))
+      const querySnapshot = await getDocs(q)
+      const history = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      setQuizHistory(history)
+    } catch (error) {
+      console.error("Error fetching quiz history:", error)
+      alert("Failed to load quiz history. Check console for details.")
+    }
+  }
+
+  const fetchFlashcards = async () => {
+    try {
+      const querySnapshot = await getDocs(collection(db, "flashcards"))
+      const allFlashcards = querySnapshot.docs.map(doc => doc.data())
+      const groupedFlashcards = allFlashcards.reduce((acc: { [key: string]: any[] }, card) => {
+        const topic = card.fileId || "Unnamed Topic"
+        if (!acc[topic]) acc[topic] = []
+        acc[topic].push({ front: card.front, back: card.back })
+        return acc
+      }, {})
+      setTopicFlashcards(groupedFlashcards)
+      if (Object.keys(groupedFlashcards).length > 0 && !selectedTopic) {
+        setSelectedTopic(Object.keys(groupedFlashcards)[0])
+      }
+    } catch (error) {
+      console.error("Error fetching flashcards:", error)
+      alert("Failed to load flashcards. Check console for details.")
+    }
+  }
+
+  const handleDeleteHistory = async () => {
+    try {
+      const querySnapshot = await getDocs(collection(db, "quizHistory"))
+      const deletePromises = querySnapshot.docs.map(doc => deleteDoc(doc.ref))
+      await Promise.all(deletePromises)
+      setQuizHistory([])
+      setViewingQuiz(null)
+      alert("Quiz history deleted successfully!")
+    } catch (error) {
+      console.error("Error deleting quiz history:", error)
+      alert("Failed to delete quiz history. Check console for details.")
+    }
+  }
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -106,13 +147,6 @@ export default function Dashboard() {
     fileInputRef.current?.click()
   }
 
-  const updateQuestionTypes = (type: string, checked: boolean) => {
-    setQuestionPrefs((prev) => ({
-      ...prev,
-      types: checked ? [...prev.types, type] : prev.types.filter((t) => t !== type),
-    }))
-  }
-
   const handleGenerateQuestions = async () => {
     if (!selectedFile) {
       alert("Please upload a file first.")
@@ -121,12 +155,12 @@ export default function Dashboard() {
 
     const formData = new FormData()
     formData.append("file", selectedFile)
-    formData.append("questionTypes", JSON.stringify(questionPrefs.types))
-    formData.append("difficulty", questionPrefs.difficulty.toString())
+    formData.append("questionType", questionPrefs.type)
+    formData.append("difficulty", questionPrefs.difficulty)
     formData.append("numQuestions", questionPrefs.numQuestions)
 
     try {
-      setIsUploading(true)
+      setIsGenerating(true)
       setUploadProgress(0)
 
       const response = await fetch("http://localhost:5000/generate-questions", {
@@ -143,9 +177,6 @@ export default function Dashboard() {
       const { questions, flashcards } = await response.json()
       console.log("Backend response:", JSON.stringify({ questions, flashcards }, null, 2))
 
-      const questionsCollection = collection(db, "generatedQuestions")
-      let completed = 0
-
       const validQuestions = questions.filter(q => {
         if (!q.correctAnswer || typeof q.correctAnswer !== "string") {
           console.warn("Invalid question object:", q)
@@ -153,21 +184,6 @@ export default function Dashboard() {
         }
         return true
       })
-
-      for (const q of validQuestions) {
-        try {
-          await addDoc(questionsCollection, {
-            question: q.correctAnswer,
-            type: q.type || "unknown",
-            difficulty: questionPrefs.difficulty,
-            createdAt: new Date(),
-          })
-          completed++
-          setUploadProgress(Math.round((completed / validQuestions.length) * 100))
-        } catch (firestoreError) {
-          console.error("Firestore write error:", firestoreError)
-        }
-      }
 
       setGeneratedQuestions(validQuestions)
       console.log("Set generatedQuestions:", validQuestions)
@@ -179,11 +195,20 @@ export default function Dashboard() {
       setGeneratedFlashcards(validFlashcards)
       console.log("Set generatedFlashcards:", validFlashcards)
 
-      setIsUploading(false)
-      alert("Questions generated and stored successfully!")
+      setTopicFlashcards((prev) => ({
+        ...prev,
+        [selectedFile?.name || "Generated Topic"]: validFlashcards,
+      }))
+      setSelectedTopic(selectedFile?.name || "Generated Topic")
+
+      setIsGenerating(false)
+      setCurrentQuizQuestion(0)
+      setUserAnswers({})
+      setQuizSubmitted(false)
+      alert("Questions generated successfully! Start the quiz.")
     } catch (error) {
       console.error("Error generating questions:", error)
-      setIsUploading(false)
+      setIsGenerating(false)
       alert(`An error occurred: ${error.message}. Check console for details.`)
     }
   }
@@ -193,6 +218,55 @@ export default function Dashboard() {
       ...prev,
       [questionIdx]: answer,
     }))
+  }
+
+  const handleFillInTheBlankAnswer = (questionIdx: number, answer: string) => {
+    setUserAnswers((prev) => ({
+      ...prev,
+      [questionIdx]: answer,
+    }))
+  }
+
+  const handleNextQuizQuestion = () => {
+    if (currentQuizQuestion < generatedQuestions.length - 1) {
+      setCurrentQuizQuestion(currentQuizQuestion + 1)
+    }
+  }
+
+  const handlePrevQuizQuestion = () => {
+    if (currentQuizQuestion > 0) {
+      setCurrentQuizQuestion(currentQuizQuestion - 1)
+    }
+  }
+
+  const handleQuizSubmit = async () => {
+    if (Object.keys(userAnswers).length !== generatedQuestions.length) {
+      alert("Please answer all questions before submitting.")
+      return
+    }
+
+    const quizData = {
+      fileName: selectedFile?.name || "Unnamed File",
+      questions: generatedQuestions.map((q, idx) => ({
+        questionText: q.questionText,
+        type: q.type,
+        options: q.options || [],
+        correctAnswer: q.correctAnswer,
+        userAnswer: userAnswers[idx] || "Not Answered",
+        isCorrect: userAnswers[idx] === q.correctAnswer,
+      })),
+      submittedAt: new Date().toISOString(),
+    }
+
+    try {
+      await addDoc(collection(db, "quizHistory"), quizData)
+      setQuizSubmitted(true)
+      fetchQuizHistory()
+      alert("Quiz submitted successfully! Navigate to the History tab to view your quiz performance.")
+    } catch (error) {
+      console.error("Error submitting quiz:", error)
+      alert("Failed to submit quiz. Check console for details.")
+    }
   }
 
   const handleKnow = () => {
@@ -212,9 +286,10 @@ export default function Dashboard() {
   }
 
   const calculateProgress = () => {
-    if (generatedFlashcards.length === 0) return 0
+    const currentCards = topicFlashcards[selectedTopic] || []
+    if (currentCards.length === 0) return 0
     const knownCount = knownFlashcards.filter(Boolean).length
-    return Math.round((knownCount / generatedFlashcards.length) * 100)
+    return Math.round((knownCount / currentCards.length) * 100)
   }
 
   return (
@@ -252,14 +327,6 @@ export default function Dashboard() {
             <Button variant="ghost" className="w-full justify-start" onClick={() => setActiveTab("analytics")}>
               <BarChart2 className="mr-2 h-4 w-4" />
               Analytics
-            </Button>
-            <Button variant="ghost" className="w-full justify-start">
-              <HelpCircle className="mr-2 h-4 w-4" />
-              Help
-            </Button>
-            <Button variant="ghost" className="w-full justify-start">
-              <Info className="mr-2 h-4 w-4" />
-              About
             </Button>
           </nav>
 
@@ -318,36 +385,37 @@ export default function Dashboard() {
                   <h2 className="text-xl font-semibold mb-4">Question Preferences</h2>
                   <div className="space-y-6">
                     <div>
-                      <Label className="text-base">Question Types</Label>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
-                        {["Multiple Choice", "Fill in the Blank", "Open Ended", "True/False"].map((label, idx) => (
-                          <div className="flex items-center space-x-2" key={idx}>
-                            <Checkbox
-                              id={label.toLowerCase().replace(/\s+/g, "-")}
-                              onCheckedChange={(checked) =>
-                                updateQuestionTypes(label, checked as boolean)
-                              }
-                            />
-                            <label
-                              htmlFor={label.toLowerCase().replace(/\s+/g, "-")}
-                              className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                            >
-                              {label}
-                            </label>
-                          </div>
-                        ))}
-                      </div>
+                      <Label className="text-base">Question Type</Label>
+                      <Select
+                        defaultValue="Multiple Choice"
+                        onValueChange={(value) =>
+                          setQuestionPrefs((prev) => ({ ...prev, type: value }))
+                        }
+                      >
+                        <SelectTrigger className="mt-2">
+                          <SelectValue placeholder="Select question type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Multiple Choice">Multiple Choice</SelectItem>
+                          <SelectItem value="Fill in the Blank">Fill in the Blank</SelectItem>
+                          <SelectItem value="True/False">True/False</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
 
                     <div>
                       <Label className="text-base">Difficulty Level</Label>
                       <div className="pt-2">
                         <Slider
-                          defaultValue={[50]}
-                          max={100}
+                          defaultValue={[1]}
+                          min={0}
+                          max={2}
                           step={1}
                           onValueChange={(value) =>
-                            setQuestionPrefs((prev) => ({ ...prev, difficulty: value[0] }))
+                            setQuestionPrefs((prev) => ({
+                              ...prev,
+                              difficulty: ["Easy", "Medium", "Hard"][value[0]],
+                            }))
                           }
                         />
                         <div className="flex justify-between mt-1 text-xs text-slate-500">
@@ -372,7 +440,7 @@ export default function Dashboard() {
                           <SelectValue placeholder="Select number of questions" />
                         </SelectTrigger>
                         <SelectContent>
-                          {[5, 10, 15, 20, 25].map((num) => (
+                          {[10, 15, 20].map((num) => (
                             <SelectItem key={num} value={num.toString()}>
                               {num} questions
                             </SelectItem>
@@ -381,51 +449,114 @@ export default function Dashboard() {
                       </Select>
                     </div>
 
-                    <Button className="w-full" onClick={handleGenerateQuestions}>
-                      Generate Questions
+                    <Button className="w-full" onClick={handleGenerateQuestions} disabled={isGenerating}>
+                      {isGenerating ? (
+                        <span className="flex items-center">
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Generating...
+                        </span>
+                      ) : (
+                        "Generate Questions"
+                      )}
                     </Button>
 
-                    {generatedQuestions.length > 0 && (
+                    {generatedQuestions.length > 0 && !quizSubmitted && !isGenerating && (
                       <div className="mt-6">
-                        <h3 className="text-lg font-semibold">Generated Questions</h3>
-                        <div className="space-y-4 mt-2">
-                          {generatedQuestions.map((q, idx) => (
-                            <div key={idx} className="p-4 bg-white rounded-lg shadow-sm">
-                              <p className="text-sm text-slate-700 mb-2">
-                                {idx + 1}. {q.questionText}
-                              </p>
-                              {q.options && q.options.length > 0 ? (
-                                <div className="space-y-2">
-                                  {q.options.map((option: string, optIdx: number) => (
-                                    <div key={optIdx} className="flex items-center space-x-2">
-                                      <Checkbox
-                                        id={`q${idx}-opt${optIdx}`}
-                                        checked={userAnswers[idx] === option}
-                                        onCheckedChange={(checked) =>
-                                          checked && handleAnswerSelect(idx, option)
-                                        }
-                                      />
-                                      <label
-                                        htmlFor={`q${idx}-opt${optIdx}`}
-                                        className="text-sm text-slate-600"
-                                      >
-                                        {option}
-                                      </label>
-                                    </div>
-                                  ))}
+                        <h3 className="text-lg font-semibold">Quiz</h3>
+                        <div className="p-4 bg-white rounded-lg shadow-sm">
+                          <p className="text-sm text-slate-700 mb-2">
+                            {currentQuizQuestion + 1}. {generatedQuestions[currentQuizQuestion].questionText}
+                          </p>
+                          {generatedQuestions[currentQuizQuestion].type === "Multiple Choice" && (
+                            <div className="space-y-2">
+                              {generatedQuestions[currentQuizQuestion].options.map((option: string, optIdx: number) => (
+                                <div key={optIdx} className="flex items-center space-x-2">
+                                  <Checkbox
+                                    id={`q${currentQuizQuestion}-opt${optIdx}`}
+                                    checked={userAnswers[currentQuizQuestion] === option}
+                                    onCheckedChange={(checked) =>
+                                      checked && handleAnswerSelect(currentQuizQuestion, option)
+                                    }
+                                  />
+                                  <label
+                                    htmlFor={`q${currentQuizQuestion}-opt${optIdx}`}
+                                    className="text-sm text-slate-600"
+                                  >
+                                    {option}
+                                  </label>
                                 </div>
-                              ) : (
-                                <p className="text-sm text-slate-500">No options available</p>
-                              )}
-                              {userAnswers[idx] && (
-                                <p className="text-sm mt-2">
-                                  Your answer: {userAnswers[idx]} 
-                                  {userAnswers[idx] === q.correctAnswer ? " (Correct)" : " (Incorrect)"}
-                                </p>
-                              )}
+                              ))}
                             </div>
-                          ))}
+                          )}
+                          {generatedQuestions[currentQuizQuestion].type === "Fill in the Blank" && (
+                            <div className="space-y-2">
+                              <Input
+                                value={userAnswers[currentQuizQuestion] || ""}
+                                onChange={(e) => handleFillInTheBlankAnswer(currentQuizQuestion, e.target.value)}
+                                placeholder="Type your answer here"
+                              />
+                            </div>
+                          )}
+                          {generatedQuestions[currentQuizQuestion].type === "True/False" && (
+                            <div className="space-y-2">
+                              {["True", "False"].map((option, optIdx) => (
+                                <div key={optIdx} className="flex items-center space-x-2">
+                                  <Checkbox
+                                    id={`q${currentQuizQuestion}-opt${optIdx}`}
+                                    checked={userAnswers[currentQuizQuestion] === option}
+                                    onCheckedChange={(checked) =>
+                                      checked && handleAnswerSelect(currentQuizQuestion, option)
+                                    }
+                                  />
+                                  <label
+                                    htmlFor={`q${currentQuizQuestion}-opt${optIdx}`}
+                                    className="text-sm text-slate-600"
+                                  >
+                                    {option}
+                                  </label>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex justify-between mt-4">
+                            <Button
+                              variant="outline"
+                              onClick={handlePrevQuizQuestion}
+                              disabled={currentQuizQuestion === 0}
+                            >
+                              Previous
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={handleNextQuizQuestion}
+                              disabled={currentQuizQuestion === generatedQuestions.length - 1}
+                            >
+                              Next
+                            </Button>
+                          </div>
+                          {currentQuizQuestion === generatedQuestions.length - 1 && (
+                            <Button className="w-full mt-4" onClick={handleQuizSubmit}>
+                              Submit Quiz
+                            </Button>
+                          )}
                         </div>
+                      </div>
+                    )}
+
+                    {quizSubmitted && (
+                      <div className="mt-6 text-center">
+                        <p className="text-lg font-semibold text-slate-700">
+                          Quiz Submitted!
+                        </p>
+                        <p className="text-sm text-slate-500 mt-2">
+                          Navigate to the History tab to view your quiz performance.
+                        </p>
+                        <Button
+                          className="mt-4"
+                          onClick={() => setActiveTab("history")}
+                        >
+                          Go to History
+                        </Button>
                       </div>
                     )}
                   </div>
@@ -439,22 +570,26 @@ export default function Dashboard() {
               <div className="flex justify-between items-center">
                 <h2 className="text-xl font-semibold">Flashcards</h2>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm">Create New</Button>
-                  <Select defaultValue="git">
+                  <Select value={selectedTopic} onValueChange={(val) => {
+                    setSelectedTopic(val)
+                    setCurrentFlashcard(0)
+                    setFlipped(false)
+                    setKnownFlashcards(new Array(topicFlashcards[val]?.length || 0).fill(false))
+                  }}>
                     <SelectTrigger className="w-[180px]">
                       <SelectValue placeholder="Select topic" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="git">Git Basics</SelectItem>
-                      <SelectItem value="react">React Fundamentals</SelectItem>
-                      <SelectItem value="python">Python Syntax</SelectItem>
+                      {Object.keys(topicFlashcards).map((topic) => (
+                        <SelectItem key={topic} value={topic}>{topic}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
               <div className="flex flex-col items-center">
-                {generatedFlashcards.length > 0 ? (
+                {topicFlashcards[selectedTopic]?.length > 0 ? (
                   <>
                     <div className="relative w-full max-w-md h-64 perspective">
                       <div
@@ -464,7 +599,7 @@ export default function Dashboard() {
                         <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
                           <div className="text-sm text-slate-500 mb-2">Front</div>
                           <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
-                            {generatedFlashcards[currentFlashcard].front}
+                            {topicFlashcards[selectedTopic][currentFlashcard].front}
                           </div>
                           <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
                         </div>
@@ -472,92 +607,153 @@ export default function Dashboard() {
                         <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
                           <div className="text-sm text-slate-500 mb-2">Back</div>
                           <div className="flex-1 flex items-center justify-center text-lg text-center">
-                            {generatedFlashcards[currentFlashcard].back}
+                            {topicFlashcards[selectedTopic][currentFlashcard].back}
                           </div>
                           <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
                         </div>
                       </div>
                     </div>
                     <p className="text-sm text-slate-500 mt-4">
-                      Card {currentFlashcard + 1} of {generatedFlashcards.length}
+                      Card {currentFlashcard + 1} of {topicFlashcards[selectedTopic].length}
                     </p>
                   </>
                 ) : (
-                  <div className="relative w-full max-w-md h-64 perspective">
-                    <div
-                      className={`absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer ${flipped ? "rotate-y-180" : ""}`}
-                      onClick={() => setFlipped(!flipped)}
-                    >
-                      <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
-                        <div className="text-sm text-slate-500 mb-2">Front</div>
-                        <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
-                          {flashcards[currentFlashcard].front}
-                        </div>
-                        <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
-                      </div>
-
-                      <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
-                        <div className="text-sm text-slate-500 mb-2">Back</div>
-                        <div className="flex-1 flex items-center justify-center text-lg text-center">
-                          {flashcards[currentFlashcard].back}
-                        </div>
-                        <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
-                      </div>
-                    </div>
-                  </div>
+                  <p className="text-sm text-slate-500">No flashcards available for this topic.</p>
                 )}
 
-                <div className="flex gap-4 mt-8">
-                  <Button variant="outline" onClick={() => {
-                    setFlipped(false)
-                    setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : (generatedFlashcards.length > 0 ? generatedFlashcards.length - 1 : flashcards.length - 1)))
-                  }}>
-                    Previous
-                  </Button>
-                  <Button variant="outline" onClick={() => {
-                    setFlipped(false)
-                    setCurrentFlashcard((prev) => (prev < (generatedFlashcards.length > 0 ? generatedFlashcards.length - 1 : flashcards.length - 1) ? prev + 1 : 0))
-                  }}>
-                    Next
-                  </Button>
-                </div>
+                {topicFlashcards[selectedTopic]?.length > 0 && (
+                  <>
+                    <div className="flex gap-4 mt-8">
+                      <Button variant="outline" onClick={() => {
+                        setFlipped(false)
+                        setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : topicFlashcards[selectedTopic].length - 1))
+                      }}>
+                        Previous
+                      </Button>
+                      <Button variant="outline" onClick={() => {
+                        setFlipped(false)
+                        setCurrentFlashcard((prev) => (prev < topicFlashcards[selectedTopic].length - 1 ? prev + 1 : 0))
+                      }}>
+                        Next
+                      </Button>
+                    </div>
 
-                <div className="flex gap-4 mt-4">
-                  <Button variant="outline" size="sm" className="gap-1" onClick={handleDontKnow}>
-                    <X className="h-4 w-4" /> Don't Know
-                  </Button>
-                  <Button variant="outline" size="sm" className="gap-1" onClick={handleKnow}>
-                    <CheckCircle className="h-4 w-4" /> Know
-                  </Button>
-                </div>
+                    <div className="flex gap-4 mt-4">
+                      <Button variant="outline" size="sm" className="gap-1" onClick={handleDontKnow}>
+                        <X className="h-4 w-4" /> Don't Know
+                      </Button>
+                      <Button variant="outline" size="sm" className="gap-1" onClick={handleKnow}>
+                        <CheckCircle className="h-4 w-4" /> Know
+                      </Button>
+                    </div>
 
-                <div className="w-full max-w-md mt-6">
-                  <div className="flex justify-between text-sm mb-1">
-                    <span>Progress</span>
-                    <span>
-                      {knownFlashcards.filter(Boolean).length}/{generatedFlashcards.length || flashcards.length} cards
-                    </span>
-                  </div>
-                  <Progress value={calculateProgress()} />
-                </div>
+                    <div className="w-full max-w-md mt-6">
+                      <div className="flex justify-between text-sm mb-1">
+                        <span>Progress</span>
+                        <span>
+                          {knownFlashcards.filter(Boolean).length}/{topicFlashcards[selectedTopic].length} cards
+                        </span>
+                      </div>
+                      <Progress value={calculateProgress()} />
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
 
           {activeTab === "history" && (
             <div className="space-y-6">
-              <h2 className="text-xl font-semibold">History</h2>
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-semibold">History</h2>
+                <Button variant="destructive" onClick={handleDeleteHistory}>
+                  <Trash2 className="mr-2 h-4 w-4" /> Delete All History
+                </Button>
+              </div>
               <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                 <div className="divide-y">
-                  {[1, 2, 3, 4, 5].map((item) => (
-                    <div key={item} className="p-4 hover:bg-slate-50">
+                  {quizHistory.map((quiz, idx) => (
+                    <div key={idx} className="p-4 hover:bg-slate-50">
                       <div className="flex justify-between items-center">
                         <div>
-                          <h3 className="font-medium">Git Basics Quiz</h3>
-                          <p className="text-sm text-slate-500">10 questions • Multiple Choice</p>
+                          <h3 className="font-medium">{quiz.fileName} Quiz</h3>
+                          <p className="text-sm text-slate-500">{quiz.questions.length} questions</p>
                         </div>
-                        <div className="text-sm text-slate-500">April 1, 2025</div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm text-slate-500">{new Date(quiz.submittedAt).toLocaleDateString()}</p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setViewingQuiz(quiz)}
+                          >
+                            View Your Quiz
+                          </Button>
+                        </div>
                       </div>
+                      {viewingQuiz && viewingQuiz.id === quiz.id && (
+                        <div className="mt-4 space-y-4">
+                          <h4 className="text-lg font-semibold">Quiz Results</h4>
+                          {quiz.questions.map((q: any, qIdx: number) => (
+                            <div key={qIdx} className="p-4 bg-gray-50 rounded-lg">
+                              <p className="text-sm text-slate-700 mb-2">
+                                {qIdx + 1}. {q.questionText} ({q.type})
+                              </p>
+                              {q.type === "Multiple Choice" && (
+                                <div className="space-y-2">
+                                  {q.options.map((option: string, optIdx: number) => (
+                                    <div key={optIdx} className="flex items-center space-x-2">
+                                      <Checkbox
+                                        id={`hist-q${qIdx}-opt${optIdx}`}
+                                        checked={q.userAnswer === option}
+                                        disabled
+                                      />
+                                      <label
+                                        htmlFor={`hist-q${qIdx}-opt${optIdx}`}
+                                        className="text-sm text-slate-600"
+                                      >
+                                        {option}
+                                      </label>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {q.type === "Fill in the Blank" && (
+                                <div className="space-y-2">
+                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                </div>
+                              )}
+                              {q.type === "True/False" && (
+                                <div className="space-y-2">
+                                  {["True", "False"].map((option, optIdx) => (
+                                    <div key={optIdx} className="flex items-center space-x-2">
+                                      <Checkbox
+                                        id={`hist-q${qIdx}-opt${optIdx}`}
+                                        checked={q.userAnswer === option}
+                                        disabled
+                                      />
+                                      <label
+                                        htmlFor={`hist-q${qIdx}-opt${optIdx}`}
+                                        className="text-sm text-slate-600"
+                                      >
+                                        {option}
+                                      </label>
+                                    </div>
+                                  ))}
+                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                </div>
+                              )}
+                              {q.type === "Multiple Choice" && (
+                                <div className="space-y-2 mt-2">
+                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -593,27 +789,15 @@ export default function Dashboard() {
                 <CardContent className="p-6">
                   <h3 className="font-medium mb-4">Study Progress by Topic</h3>
                   <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span>Git Basics</span>
-                        <span>85%</span>
+                    {Object.keys(topicFlashcards).map((topic) => (
+                      <div key={topic}>
+                        <div className="flex justify-between text-sm mb-1">
+                          <span>{topic}</span>
+                          <span>{Math.round((knownFlashcards.filter(Boolean).length / (topicFlashcards[topic].length || 1)) * 100)}%</span>
+                        </div>
+                        <Progress value={Math.round((knownFlashcards.filter(Boolean).length / (topicFlashcards[topic].length || 1)) * 100)} />
                       </div>
-                      <Progress value={85} />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span>React Fundamentals</span>
-                        <span>62%</span>
-                      </div>
-                      <Progress value={62} />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span>Python Syntax</span>
-                        <span>45%</span>
-                      </div>
-                      <Progress value={45} />
-                    </div>
+                    ))}
                   </div>
                 </CardContent>
               </Card>
