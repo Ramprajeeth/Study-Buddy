@@ -109,7 +109,7 @@ export default function Dashboard() {
       (snapshot) => {
         const history = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
         setQuizHistory(history)
-        setFirestoreError(null) // Clear error on success
+        setFirestoreError(null)
         updateAnalytics(history)
       },
       (error) => {
@@ -238,7 +238,12 @@ export default function Dashboard() {
         throw new Error("Failed to generate questions")
       }
 
-      const { questions, flashcards } = await response.json()
+      const data = await response.json()
+      if (!data.questions || !data.flashcards) {
+        throw new Error("Invalid response format from server")
+      }
+
+      const { questions, flashcards } = data
       console.log("Backend response:", JSON.stringify({ questions, flashcards }, null, 2))
 
       const validQuestions = questions.filter(q => {
@@ -670,19 +675,26 @@ export default function Dashboard() {
                       <Card
                         key={topic}
                         className={cn(
-                          "cursor-pointer hover:shadow-lg transition-all duration-300",
+                          "transition-all duration-300",
                           theme === "light" ? "bg-white" : "bg-gray-800"
                         )}
-                        onClick={() => {
-                          setSelectedTopic(topic)
-                          setCurrentFlashcard(0)
-                          setFlipped(false)
-                          setKnownFlashcards(new Array(topicFlashcards[topic].length).fill(false))
-                        }}
                       >
                         <CardContent className="p-6">
                           <h3 className="text-lg font-medium">{topic}</h3>
                           <p className="text-sm mt-1">{topicFlashcards[topic].length} flashcards</p>
+                          <div className="mt-4">
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                setSelectedTopic(topic)
+                                setCurrentFlashcard(0)
+                                setFlipped(false)
+                                setKnownFlashcards(new Array(topicFlashcards[topic].length).fill(false))
+                              }}
+                            >
+                              View Flashcards
+                            </Button>
+                          </div>
                         </CardContent>
                       </Card>
                     ))}
