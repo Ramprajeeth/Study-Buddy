@@ -15,6 +15,7 @@ import {
   Loader2,
   Trash2,
 } from "lucide-react"
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -31,7 +32,8 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Input } from "@/components/ui/input"
 import { db } from "@/lib/firebase"
-import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc } from "firebase/firestore"
+import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, onSnapshot } from "firebase/firestore"
+import { cn } from "@/lib/utils"
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState("generate")
@@ -59,6 +61,14 @@ export default function Dashboard() {
   const [selectedTopic, setSelectedTopic] = useState<string>("")
   const [viewingQuiz, setViewingQuiz] = useState<any | null>(null)
   const [topicFlashcards, setTopicFlashcards] = useState<{ [key: string]: any[] }>({})
+  const [theme, setTheme] = useState<"light" | "dark">("light")
+  const [analyticsData, setAnalyticsData] = useState({
+    totalQuizzes: 0,
+    accuracyRate: 0,
+    averageTimePerQuiz: 0,
+    totalFlashcardsReviewed: 0,
+  })
+  const [quizStartTime, setQuizStartTime] = useState<number | null>(null)
 
   useEffect(() => {
     setKnownFlashcards(new Array(generatedFlashcards.length).fill(false))
@@ -66,21 +76,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     console.log("Current generatedFlashcards in state:", generatedFlashcards)
-    fetchQuizHistory()
     fetchFlashcards()
-  }, [generatedFlashcards])
-
-  const fetchQuizHistory = async () => {
-    try {
-      const q = query(collection(db, "quizHistory"), orderBy("submittedAt", "desc"))
-      const querySnapshot = await getDocs(q)
-      const history = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    const unsubscribeQuiz = onSnapshot(query(collection(db, "quizHistory"), orderBy("submittedAt", "desc")), (snapshot) => {
+      const history = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       setQuizHistory(history)
-    } catch (error) {
-      console.error("Error fetching quiz history:", error)
-      alert("Failed to load quiz history. Check console for details.")
-    }
-  }
+      updateAnalytics(history)
+    })
+    return () => unsubscribeQuiz()
+  }, [generatedFlashcards])
 
   const fetchFlashcards = async () => {
     try {
@@ -93,13 +96,31 @@ export default function Dashboard() {
         return acc
       }, {})
       setTopicFlashcards(groupedFlashcards)
-      if (Object.keys(groupedFlashcards).length > 0 && !selectedTopic) {
-        setSelectedTopic(Object.keys(groupedFlashcards)[0])
-      }
     } catch (error) {
       console.error("Error fetching flashcards:", error)
       alert("Failed to load flashcards. Check console for details.")
     }
+  }
+
+  const updateAnalytics = (history: any[]) => {
+    const totalQuizzes = history.length
+    const totalQuestions = history.reduce((sum, quiz) => sum + quiz.questions.length, 0)
+    const correctAnswers = history.reduce((sum, quiz) => sum + quiz.questions.filter((q: any) => q.isCorrect).length, 0)
+    const accuracyRate = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0
+    const totalTime = history.reduce((sum, quiz) => {
+      const submittedAt = new Date(quiz.submittedAt).getTime()
+      const startedAt = quiz.startedAt ? new Date(quiz.startedAt).getTime() : submittedAt
+      return sum + (submittedAt - startedAt)
+    }, 0)
+    const averageTimePerQuiz = totalQuizzes > 0 ? Math.round(totalTime / totalQuizzes / 1000 / 60) : 0 // in minutes
+    const totalFlashcardsReviewed = Object.values(topicFlashcards).flat().length
+
+    setAnalyticsData({
+      totalQuizzes,
+      accuracyRate,
+      averageTimePerQuiz,
+      totalFlashcardsReviewed,
+    })
   }
 
   const handleDeleteHistory = async () => {
@@ -162,6 +183,7 @@ export default function Dashboard() {
     try {
       setIsGenerating(true)
       setUploadProgress(0)
+      setQuizStartTime(Date.now())
 
       const response = await fetch("http://localhost:5000/generate-questions", {
         method: "POST",
@@ -255,13 +277,14 @@ export default function Dashboard() {
         userAnswer: userAnswers[idx] || "Not Answered",
         isCorrect: userAnswers[idx] === q.correctAnswer,
       })),
+      startedAt: quizStartTime ? new Date(quizStartTime).toISOString() : new Date().toISOString(),
       submittedAt: new Date().toISOString(),
     }
 
     try {
       await addDoc(collection(db, "quizHistory"), quizData)
       setQuizSubmitted(true)
-      fetchQuizHistory()
+      setQuizStartTime(null)
       alert("Quiz submitted successfully! Navigate to the History tab to view your quiz performance.")
     } catch (error) {
       console.error("Error submitting quiz:", error)
@@ -285,15 +308,20 @@ export default function Dashboard() {
     })
   }
 
-  const calculateProgress = () => {
-    const currentCards = topicFlashcards[selectedTopic] || []
+  const calculateProgress = (topic: string) => {
+    const currentCards = topicFlashcards[topic] || []
     if (currentCards.length === 0) return 0
     const knownCount = knownFlashcards.filter(Boolean).length
     return Math.round((knownCount / currentCards.length) * 100)
   }
 
+  const accuracyChartData = quizHistory.map((quiz, idx) => ({
+    name: `Quiz ${idx + 1}`,
+    accuracy: quiz.questions.length > 0 ? Math.round((quiz.questions.filter((q: any) => q.isCorrect).length / quiz.questions.length) * 100) : 0,
+  }))
+
   return (
-    <div className="flex h-screen bg-slate-50">
+    <div className={cn("flex h-screen transition-all duration-300", theme === "light" ? "bg-slate-50 text-black" : "bg-black text-gray-200")}>
       <button
         className="fixed z-20 bottom-4 right-4 md:hidden bg-primary text-white p-3 rounded-full shadow-lg"
         onClick={() => setShowSidebar(!showSidebar)}
@@ -302,12 +330,15 @@ export default function Dashboard() {
       </button>
 
       <div
-        className={`fixed inset-y-0 left-0 transform ${
-          showSidebar ? "translate-x-0" : "-translate-x-full"
-        } md:relative md:translate-x-0 z-10 w-64 bg-white shadow-lg transition-transform duration-300 ease-in-out`}
+        className={cn(
+          `fixed inset-y-0 left-0 transform ${
+            showSidebar ? "translate-x-0" : "-translate-x-full"
+          } md:relative md:translate-x-0 z-10 w-64 shadow-lg transition-transform duration-300 ease-in-out`,
+          theme === "light" ? "bg-white" : "bg-gray-900"
+        )}
       >
         <div className="flex flex-col h-full">
-          <div className="p-4 border-b">
+          <div className={cn("p-4 border-b", theme === "light" ? "border-gray-200" : "border-gray-700")}>
             <div className="font-bold text-2xl text-primary">Study Buddy</div>
           </div>
 
@@ -330,8 +361,17 @@ export default function Dashboard() {
             </Button>
           </nav>
 
-          <div className="p-4 border-t">
-            <Button variant="outline" className="w-full justify-start">
+          <div className={cn("p-4 border-t", theme === "light" ? "border-gray-200" : "border-gray-700")}>
+            <Select value={theme} onValueChange={(val: "light" | "dark") => setTheme(val)}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Theme" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="light">Light</SelectItem>
+                <SelectItem value="dark">Dark</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" className="w-full justify-start mt-2">
               <LogOut className="mr-2 h-4 w-4" />
               Sign Out
             </Button>
@@ -340,29 +380,28 @@ export default function Dashboard() {
       </div>
 
       <div className="flex-1 overflow-auto">
-        <header className="bg-white shadow-sm p-4 sticky top-0 z-10">
-          <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
+        <header className={cn("shadow-sm p-4 sticky top-0 z-10 transition-colors duration-300", theme === "light" ? "bg-white" : "bg-gray-900")}>
+          <h1 className="text-2xl font-semibold">Dashboard</h1>
         </header>
 
         <main className="p-6">
           {activeTab === "generate" && (
             <div className="space-y-6">
-              <Card>
+              <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                 <CardContent className="p-6">
                   <h2 className="text-xl font-semibold mb-4">Upload Study Materials</h2>
                   <div
-                    className={`border-2 border-dashed rounded-lg p-8 text-center ${
-                      isDragging ? "border-primary bg-primary/10" : "border-slate-300"
-                    }`}
+                    className={cn(
+                      `border-2 border-dashed rounded-lg p-8 text-center transition-colors duration-300`,
+                      isDragging ? "border-primary bg-primary/10" : theme === "light" ? "border-slate-300" : "border-gray-600"
+                    )}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
                   >
-                    <Upload className="h-12 w-12 mx-auto text-slate-400" />
-                    <p className="mt-2 text-sm font-medium text-slate-600">
-                      Drag and drop your files here, or click to browse
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">Supports PDF, PowerPoint, Word, and Text files</p>
+                    <Upload className="h-12 w-12 mx-auto text-gray-400" />
+                    <p className="mt-2 text-sm font-medium">Drag and drop your files here, or click to browse</p>
+                    <p className="mt-1 text-xs">Supports PDF, PowerPoint, Word, and Text files</p>
                     <input
                       type="file"
                       ref={fileInputRef}
@@ -374,13 +413,13 @@ export default function Dashboard() {
                       Browse Files
                     </Button>
                     {selectedFile && (
-                      <p className="mt-2 text-sm text-slate-700">Selected: {selectedFile.name}</p>
+                      <p className="mt-2 text-sm">Selected: {selectedFile.name}</p>
                     )}
                   </div>
                 </CardContent>
               </Card>
 
-              <Card>
+              <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                 <CardContent className="p-6">
                   <h2 className="text-xl font-semibold mb-4">Question Preferences</h2>
                   <div className="space-y-6">
@@ -418,7 +457,7 @@ export default function Dashboard() {
                             }))
                           }
                         />
-                        <div className="flex justify-between mt-1 text-xs text-slate-500">
+                        <div className="flex justify-between mt-1 text-xs text-gray-500">
                           <span>Easy</span>
                           <span>Medium</span>
                           <span>Hard</span>
@@ -463,8 +502,8 @@ export default function Dashboard() {
                     {generatedQuestions.length > 0 && !quizSubmitted && !isGenerating && (
                       <div className="mt-6">
                         <h3 className="text-lg font-semibold">Quiz</h3>
-                        <div className="p-4 bg-white rounded-lg shadow-sm">
-                          <p className="text-sm text-slate-700 mb-2">
+                        <div className={cn("p-4 rounded-lg shadow-sm transition-colors duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                          <p className="text-sm mb-2">
                             {currentQuizQuestion + 1}. {generatedQuestions[currentQuizQuestion].questionText}
                           </p>
                           {generatedQuestions[currentQuizQuestion].type === "Multiple Choice" && (
@@ -480,7 +519,7 @@ export default function Dashboard() {
                                   />
                                   <label
                                     htmlFor={`q${currentQuizQuestion}-opt${optIdx}`}
-                                    className="text-sm text-slate-600"
+                                    className="text-sm"
                                   >
                                     {option}
                                   </label>
@@ -494,6 +533,7 @@ export default function Dashboard() {
                                 value={userAnswers[currentQuizQuestion] || ""}
                                 onChange={(e) => handleFillInTheBlankAnswer(currentQuizQuestion, e.target.value)}
                                 placeholder="Type your answer here"
+                                className={theme === "dark" ? "bg-gray-700 text-gray-200" : ""}
                               />
                             </div>
                           )}
@@ -510,7 +550,7 @@ export default function Dashboard() {
                                   />
                                   <label
                                     htmlFor={`q${currentQuizQuestion}-opt${optIdx}`}
-                                    className="text-sm text-slate-600"
+                                    className="text-sm"
                                   >
                                     {option}
                                   </label>
@@ -545,10 +585,10 @@ export default function Dashboard() {
 
                     {quizSubmitted && (
                       <div className="mt-6 text-center">
-                        <p className="text-lg font-semibold text-slate-700">
+                        <p className="text-lg font-semibold">
                           Quiz Submitted!
                         </p>
-                        <p className="text-sm text-slate-500 mt-2">
+                        <p className="text-sm mt-2">
                           Navigate to the History tab to view your quiz performance.
                         </p>
                         <Button
@@ -567,98 +607,109 @@ export default function Dashboard() {
 
           {activeTab === "flashcards" && (
             <div className="space-y-6">
-              <div className="flex justify-between items-center">
-                <h2 className="text-xl font-semibold">Flashcards</h2>
-                <div className="flex gap-2">
-                  <Select value={selectedTopic} onValueChange={(val) => {
-                    setSelectedTopic(val)
-                    setCurrentFlashcard(0)
-                    setFlipped(false)
-                    setKnownFlashcards(new Array(topicFlashcards[val]?.length || 0).fill(false))
-                  }}>
-                    <SelectTrigger className="w-[180px]">
-                      <SelectValue placeholder="Select topic" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.keys(topicFlashcards).map((topic) => (
-                        <SelectItem key={topic} value={topic}>{topic}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <div className="flex flex-col items-center">
-                {topicFlashcards[selectedTopic]?.length > 0 ? (
-                  <>
-                    <div className="relative w-full max-w-md h-64 perspective">
-                      <div
-                        className={`absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer ${flipped ? "rotate-y-180" : ""}`}
-                        onClick={() => setFlipped(!flipped)}
+              {!selectedTopic ? (
+                <>
+                  <h2 className="text-xl font-semibold">Flashcards</h2>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {Object.keys(topicFlashcards).map((topic) => (
+                      <Card
+                        key={topic}
+                        className={cn(
+                          "cursor-pointer hover:shadow-lg transition-all duration-300",
+                          theme === "light" ? "bg-white" : "bg-gray-800"
+                        )}
+                        onClick={() => {
+                          setSelectedTopic(topic)
+                          setCurrentFlashcard(0)
+                          setFlipped(false)
+                          setKnownFlashcards(new Array(topicFlashcards[topic].length).fill(false))
+                        }}
                       >
-                        <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col">
-                          <div className="text-sm text-slate-500 mb-2">Front</div>
-                          <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
-                            {topicFlashcards[selectedTopic][currentFlashcard].front}
+                        <CardContent className="p-6">
+                          <h3 className="text-lg font-medium">{topic}</h3>
+                          <p className="text-sm mt-1">{topicFlashcards[topic].length} flashcards</p>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex justify-between items-center">
+                    <h2 className="text-xl font-semibold">{selectedTopic} Flashcards</h2>
+                    <Button variant="outline" onClick={() => setSelectedTopic("")}>
+                      Back to Topics
+                    </Button>
+                  </div>
+                  <div className="flex flex-col items-center">
+                    {topicFlashcards[selectedTopic].length > 0 ? (
+                      <>
+                        <div className="relative w-full max-w-md h-64 perspective">
+                          <div
+                            className={cn(
+                              `absolute w-full h-full transition-all duration-500 transform-style preserve-3d cursor-pointer`,
+                              flipped ? "rotate-y-180" : ""
+                            )}
+                            onClick={() => setFlipped(!flipped)}
+                          >
+                            <div className={cn("absolute w-full h-full backface-hidden rounded-xl shadow-lg p-6 flex flex-col", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                              <div className="text-sm mb-2">Front</div>
+                              <div className="flex-1 flex items-center justify-center text-xl font-medium text-center">
+                                {topicFlashcards[selectedTopic][currentFlashcard].front}
+                              </div>
+                              <div className="text-sm text-center mt-4">Click to flip</div>
+                            </div>
+
+                            <div className={cn("absolute w-full h-full backface-hidden rounded-xl shadow-lg p-6 flex flex-col rotate-y-180", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                              <div className="text-sm mb-2">Back</div>
+                              <div className="flex-1 flex items-center justify-center text-lg text-center">
+                                {topicFlashcards[selectedTopic][currentFlashcard].back}
+                              </div>
+                              <div className="text-sm text-center mt-4">Click to flip</div>
+                            </div>
                           </div>
-                          <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
                         </div>
-
-                        <div className="absolute w-full h-full backface-hidden bg-white rounded-xl shadow-lg p-6 flex flex-col rotate-y-180">
-                          <div className="text-sm text-slate-500 mb-2">Back</div>
-                          <div className="flex-1 flex items-center justify-center text-lg text-center">
-                            {topicFlashcards[selectedTopic][currentFlashcard].back}
+                        <p className="text-sm mt-4">
+                          Card {currentFlashcard + 1} of {topicFlashcards[selectedTopic].length}
+                        </p>
+                        <div className="flex gap-4 mt-8">
+                          <Button variant="outline" onClick={() => {
+                            setFlipped(false)
+                            setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : topicFlashcards[selectedTopic].length - 1))
+                          }}>
+                            Previous
+                          </Button>
+                          <Button variant="outline" onClick={() => {
+                            setFlipped(false)
+                            setCurrentFlashcard((prev) => (prev < topicFlashcards[selectedTopic].length - 1 ? prev + 1 : 0))
+                          }}>
+                            Next
+                          </Button>
+                        </div>
+                        <div className="flex gap-4 mt-4">
+                          <Button variant="outline" size="sm" className="gap-1" onClick={handleDontKnow}>
+                            <X className="h-4 w-4" /> Don't Know
+                          </Button>
+                          <Button variant="outline" size="sm" className="gap-1" onClick={handleKnow}>
+                            <CheckCircle className="h-4 w-4" /> Know
+                          </Button>
+                        </div>
+                        <div className="w-full max-w-md mt-6">
+                          <div className="flex justify-between text-sm mb-1">
+                            <span>Progress</span>
+                            <span>
+                              {knownFlashcards.filter(Boolean).length}/{topicFlashcards[selectedTopic].length} cards
+                            </span>
                           </div>
-                          <div className="text-sm text-slate-400 text-center mt-4">Click to flip</div>
+                          <Progress value={calculateProgress(selectedTopic)} />
                         </div>
-                      </div>
-                    </div>
-                    <p className="text-sm text-slate-500 mt-4">
-                      Card {currentFlashcard + 1} of {topicFlashcards[selectedTopic].length}
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-sm text-slate-500">No flashcards available for this topic.</p>
-                )}
-
-                {topicFlashcards[selectedTopic]?.length > 0 && (
-                  <>
-                    <div className="flex gap-4 mt-8">
-                      <Button variant="outline" onClick={() => {
-                        setFlipped(false)
-                        setCurrentFlashcard((prev) => (prev > 0 ? prev - 1 : topicFlashcards[selectedTopic].length - 1))
-                      }}>
-                        Previous
-                      </Button>
-                      <Button variant="outline" onClick={() => {
-                        setFlipped(false)
-                        setCurrentFlashcard((prev) => (prev < topicFlashcards[selectedTopic].length - 1 ? prev + 1 : 0))
-                      }}>
-                        Next
-                      </Button>
-                    </div>
-
-                    <div className="flex gap-4 mt-4">
-                      <Button variant="outline" size="sm" className="gap-1" onClick={handleDontKnow}>
-                        <X className="h-4 w-4" /> Don't Know
-                      </Button>
-                      <Button variant="outline" size="sm" className="gap-1" onClick={handleKnow}>
-                        <CheckCircle className="h-4 w-4" /> Know
-                      </Button>
-                    </div>
-
-                    <div className="w-full max-w-md mt-6">
-                      <div className="flex justify-between text-sm mb-1">
-                        <span>Progress</span>
-                        <span>
-                          {knownFlashcards.filter(Boolean).length}/{topicFlashcards[selectedTopic].length} cards
-                        </span>
-                      </div>
-                      <Progress value={calculateProgress()} />
-                    </div>
-                  </>
-                )}
-              </div>
+                      </>
+                    ) : (
+                      <p className="text-sm">No flashcards available for this topic.</p>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -670,17 +721,17 @@ export default function Dashboard() {
                   <Trash2 className="mr-2 h-4 w-4" /> Delete All History
                 </Button>
               </div>
-              <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+              <div className={cn("rounded-xl shadow-sm overflow-hidden transition-colors duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                 <div className="divide-y">
                   {quizHistory.map((quiz, idx) => (
-                    <div key={idx} className="p-4 hover:bg-slate-50">
+                    <div key={idx} className={cn("p-4", theme === "light" ? "hover:bg-slate-50" : "hover:bg-gray-700")}>
                       <div className="flex justify-between items-center">
                         <div>
                           <h3 className="font-medium">{quiz.fileName} Quiz</h3>
-                          <p className="text-sm text-slate-500">{quiz.questions.length} questions</p>
+                          <p className="text-sm">{quiz.questions.length} questions</p>
                         </div>
                         <div className="flex items-center gap-2">
-                          <p className="text-sm text-slate-500">{new Date(quiz.submittedAt).toLocaleDateString()}</p>
+                          <p className="text-sm">{new Date(quiz.submittedAt).toLocaleDateString()}</p>
                           <Button
                             variant="outline"
                             size="sm"
@@ -694,8 +745,8 @@ export default function Dashboard() {
                         <div className="mt-4 space-y-4">
                           <h4 className="text-lg font-semibold">Quiz Results</h4>
                           {quiz.questions.map((q: any, qIdx: number) => (
-                            <div key={qIdx} className="p-4 bg-gray-50 rounded-lg">
-                              <p className="text-sm text-slate-700 mb-2">
+                            <div key={qIdx} className={cn("p-4 rounded-lg transition-colors duration-300", theme === "light" ? "bg-gray-50" : "bg-gray-700")}>
+                              <p className="text-sm mb-2">
                                 {qIdx + 1}. {q.questionText} ({q.type})
                               </p>
                               {q.type === "Multiple Choice" && (
@@ -709,7 +760,7 @@ export default function Dashboard() {
                                       />
                                       <label
                                         htmlFor={`hist-q${qIdx}-opt${optIdx}`}
-                                        className="text-sm text-slate-600"
+                                        className="text-sm"
                                       >
                                         {option}
                                       </label>
@@ -719,7 +770,7 @@ export default function Dashboard() {
                               )}
                               {q.type === "Fill in the Blank" && (
                                 <div className="space-y-2">
-                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
                                   <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
                                 </div>
                               )}
@@ -734,19 +785,19 @@ export default function Dashboard() {
                                       />
                                       <label
                                         htmlFor={`hist-q${qIdx}-opt${optIdx}`}
-                                        className="text-sm text-slate-600"
+                                        className="text-sm"
                                       >
                                         {option}
                                       </label>
                                     </div>
                                   ))}
-                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
                                   <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
                                 </div>
                               )}
                               {q.type === "Multiple Choice" && (
                                 <div className="space-y-2 mt-2">
-                                  <p className="text-sm text-slate-600">Your answer: <span className={q.isCorrect ? "text-black" : "text-red-500"}>{q.userAnswer}</span></p>
+                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
                                   <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
                                 </div>
                               )}
@@ -764,28 +815,34 @@ export default function Dashboard() {
           {activeTab === "analytics" && (
             <div className="space-y-6">
               <h2 className="text-xl font-semibold">Analytics</h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Card>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                   <CardContent className="p-6">
-                    <div className="text-sm text-slate-500">Total Questions</div>
-                    <div className="text-3xl font-bold mt-1">248</div>
+                    <div className="text-sm">Total Quizzes Taken</div>
+                    <div className="text-3xl font-bold mt-1">{analyticsData.totalQuizzes}</div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                   <CardContent className="p-6">
-                    <div className="text-sm text-slate-500">Flashcards Created</div>
-                    <div className="text-3xl font-bold mt-1">124</div>
+                    <div className="text-sm">Accuracy Rate</div>
+                    <div className="text-3xl font-bold mt-1">{analyticsData.accuracyRate}%</div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                   <CardContent className="p-6">
-                    <div className="text-sm text-slate-500">Accuracy Rate</div>
-                    <div className="text-3xl font-bold mt-1">78%</div>
+                    <div className="text-sm">Avg Time Per Quiz</div>
+                    <div className="text-3xl font-bold mt-1">{analyticsData.averageTimePerQuiz} min</div>
+                  </CardContent>
+                </Card>
+                <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                  <CardContent className="p-6">
+                    <div className="text-sm">Flashcards Reviewed</div>
+                    <div className="text-3xl font-bold mt-1">{analyticsData.totalFlashcardsReviewed}</div>
                   </CardContent>
                 </Card>
               </div>
 
-              <Card>
+              <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
                 <CardContent className="p-6">
                   <h3 className="font-medium mb-4">Study Progress by Topic</h3>
                   <div className="space-y-4">
@@ -793,11 +850,28 @@ export default function Dashboard() {
                       <div key={topic}>
                         <div className="flex justify-between text-sm mb-1">
                           <span>{topic}</span>
-                          <span>{Math.round((knownFlashcards.filter(Boolean).length / (topicFlashcards[topic].length || 1)) * 100)}%</span>
+                          <span>{calculateProgress(topic)}%</span>
                         </div>
-                        <Progress value={Math.round((knownFlashcards.filter(Boolean).length / (topicFlashcards[topic].length || 1)) * 100)} />
+                        <Progress value={calculateProgress(topic)} />
                       </div>
                     ))}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className={cn("transition-all duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                <CardContent className="p-6">
+                  <h3 className="font-medium mb-4">Accuracy Over Time</h3>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={accuracyChartData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={theme === "light" ? "#ccc" : "#555"} />
+                        <XAxis dataKey="name" stroke={theme === "light" ? "#000" : "#fff"} />
+                        <YAxis stroke={theme === "light" ? "#000" : "#fff"} />
+                        <Tooltip contentStyle={{ backgroundColor: theme === "light" ? "#fff" : "#333", color: theme === "light" ? "#000" : "#fff" }} />
+                        <Bar dataKey="accuracy" fill={theme === "light" ? "#4f46e5" : "#7dd3fc"} />
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
                 </CardContent>
               </Card>
