@@ -1,6 +1,7 @@
 "use client"
 import * as React from "react"
 import { useState, useRef, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import {
   FileText,
   History,
@@ -32,7 +33,7 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Input } from "@/components/ui/input"
 import { db } from "@/lib/firebase"
-import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, onSnapshot } from "firebase/firestore"
+import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, onSnapshot, where } from "firebase/firestore"
 import { cn } from "@/lib/utils"
 
 export default function Dashboard() {
@@ -69,25 +70,64 @@ export default function Dashboard() {
     totalFlashcardsReviewed: 0,
   })
   const [quizStartTime, setQuizStartTime] = useState<number | null>(null)
+  const [user, setUser] = useState<any>(null)
+  const [firestoreError, setFirestoreError] = useState<string | null>(null)
+  const router = useRouter()
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const storedUser = JSON.parse(localStorage.getItem("user") || "{}")
+      setUser(storedUser)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (user === null) return;
+    if (!user?.username) {
+      router.push("/")
+    }
+  }, [user, router])
 
   useEffect(() => {
     setKnownFlashcards(new Array(generatedFlashcards.length).fill(false))
   }, [generatedFlashcards])
 
   useEffect(() => {
+    if (!user?.username) return;
+
     console.log("Current generatedFlashcards in state:", generatedFlashcards)
     fetchFlashcards()
-    const unsubscribeQuiz = onSnapshot(query(collection(db, "quizHistory"), orderBy("submittedAt", "desc")), (snapshot) => {
-      const history = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
-      setQuizHistory(history)
-      updateAnalytics(history)
-    })
+
+    const q = query(
+      collection(db, "quizHistory"),
+      where("userId", "==", user.username),
+      orderBy("submittedAt", "desc")
+    )
+
+    const unsubscribeQuiz = onSnapshot(
+      q,
+      (snapshot) => {
+        const history = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+        setQuizHistory(history)
+        setFirestoreError(null) // Clear error on success
+        updateAnalytics(history)
+      },
+      (error) => {
+        console.error("Error in quizHistory snapshot:", error)
+        setFirestoreError(
+          "Failed to load quiz history. If this persists, ensure the required Firestore index is created: " +
+          "https://console.firebase.google.com/v1/r/project/study-buddy-63a7a/firestore/indexes"
+        )
+      }
+    )
+
     return () => unsubscribeQuiz()
-  }, [generatedFlashcards])
+  }, [user])
 
   const fetchFlashcards = async () => {
+    if (!user?.username) return;
     try {
-      const querySnapshot = await getDocs(collection(db, "flashcards"))
+      const querySnapshot = await getDocs(query(collection(db, "flashcards"), where("userId", "==", user.username)))
       const allFlashcards = querySnapshot.docs.map(doc => doc.data())
       const groupedFlashcards = allFlashcards.reduce((acc: { [key: string]: any[] }, card) => {
         const topic = card.fileId || "Unnamed Topic"
@@ -112,7 +152,7 @@ export default function Dashboard() {
       const startedAt = quiz.startedAt ? new Date(quiz.startedAt).getTime() : submittedAt
       return sum + (submittedAt - startedAt)
     }, 0)
-    const averageTimePerQuiz = totalQuizzes > 0 ? Math.round(totalTime / totalQuizzes / 1000 / 60) : 0 // in minutes
+    const averageTimePerQuiz = totalQuizzes > 0 ? Math.round(totalTime / totalQuizzes / 1000 / 60) : 0
     const totalFlashcardsReviewed = Object.values(topicFlashcards).flat().length
 
     setAnalyticsData({
@@ -124,8 +164,9 @@ export default function Dashboard() {
   }
 
   const handleDeleteHistory = async () => {
+    if (!user?.username) return;
     try {
-      const querySnapshot = await getDocs(collection(db, "quizHistory"))
+      const querySnapshot = await getDocs(query(collection(db, "quizHistory"), where("userId", "==", user.username)))
       const deletePromises = querySnapshot.docs.map(doc => deleteDoc(doc.ref))
       await Promise.all(deletePromises)
       setQuizHistory([])
@@ -169,8 +210,8 @@ export default function Dashboard() {
   }
 
   const handleGenerateQuestions = async () => {
-    if (!selectedFile) {
-      alert("Please upload a file first.")
+    if (!selectedFile || !user?.username) {
+      alert("Please upload a file first or ensure you are logged in.")
       return
     }
 
@@ -179,6 +220,7 @@ export default function Dashboard() {
     formData.append("questionType", questionPrefs.type)
     formData.append("difficulty", questionPrefs.difficulty)
     formData.append("numQuestions", questionPrefs.numQuestions)
+    formData.append("userId", user.username)
 
     try {
       setIsGenerating(true)
@@ -262,6 +304,7 @@ export default function Dashboard() {
   }
 
   const handleQuizSubmit = async () => {
+    if (!user?.username) return;
     if (Object.keys(userAnswers).length !== generatedQuestions.length) {
       alert("Please answer all questions before submitting.")
       return
@@ -279,6 +322,7 @@ export default function Dashboard() {
       })),
       startedAt: quizStartTime ? new Date(quizStartTime).toISOString() : new Date().toISOString(),
       submittedAt: new Date().toISOString(),
+      userId: user.username,
     }
 
     try {
@@ -315,10 +359,21 @@ export default function Dashboard() {
     return Math.round((knownCount / currentCards.length) * 100)
   }
 
+  const handleLogout = () => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("user")
+    }
+    router.push("/")
+  }
+
   const accuracyChartData = quizHistory.map((quiz, idx) => ({
     name: `Quiz ${idx + 1}`,
     accuracy: quiz.questions.length > 0 ? Math.round((quiz.questions.filter((q: any) => q.isCorrect).length / quiz.questions.length) * 100) : 0,
   }))
+
+  if (user === null) {
+    return <div>Loading...</div>
+  }
 
   return (
     <div className={cn("flex h-screen transition-all duration-300", theme === "light" ? "bg-slate-50 text-black" : "bg-black text-gray-200")}>
@@ -371,9 +426,9 @@ export default function Dashboard() {
                 <SelectItem value="dark">Dark</SelectItem>
               </SelectContent>
             </Select>
-            <Button variant="outline" className="w-full justify-start mt-2">
+            <Button variant="outline" className="w-full justify-start mt-2" onClick={handleLogout}>
               <LogOut className="mr-2 h-4 w-4" />
-              Sign Out
+              Logout
             </Button>
           </div>
         </div>
@@ -721,94 +776,101 @@ export default function Dashboard() {
                   <Trash2 className="mr-2 h-4 w-4" /> Delete All History
                 </Button>
               </div>
-              <div className={cn("rounded-xl shadow-sm overflow-hidden transition-colors duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
-                <div className="divide-y">
-                  {quizHistory.map((quiz, idx) => (
-                    <div key={idx} className={cn("p-4", theme === "light" ? "hover:bg-slate-50" : "hover:bg-gray-700")}>
-                      <div className="flex justify-between items-center">
-                        <div>
-                          <h3 className="font-medium">{quiz.fileName} Quiz</h3>
-                          <p className="text-sm">{quiz.questions.length} questions</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm">{new Date(quiz.submittedAt).toLocaleDateString()}</p>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setViewingQuiz(quiz)}
-                          >
-                            View Your Quiz
-                          </Button>
-                        </div>
-                      </div>
-                      {viewingQuiz && viewingQuiz.id === quiz.id && (
-                        <div className="mt-4 space-y-4">
-                          <h4 className="text-lg font-semibold">Quiz Results</h4>
-                          {quiz.questions.map((q: any, qIdx: number) => (
-                            <div key={qIdx} className={cn("p-4 rounded-lg transition-colors duration-300", theme === "light" ? "bg-gray-50" : "bg-gray-700")}>
-                              <p className="text-sm mb-2">
-                                {qIdx + 1}. {q.questionText} ({q.type})
-                              </p>
-                              {q.type === "Multiple Choice" && (
-                                <div className="space-y-2">
-                                  {q.options.map((option: string, optIdx: number) => (
-                                    <div key={optIdx} className="flex items-center space-x-2">
-                                      <Checkbox
-                                        id={`hist-q${qIdx}-opt${optIdx}`}
-                                        checked={q.userAnswer === option}
-                                        disabled
-                                      />
-                                      <label
-                                        htmlFor={`hist-q${qIdx}-opt${optIdx}`}
-                                        className="text-sm"
-                                      >
-                                        {option}
-                                      </label>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                              {q.type === "Fill in the Blank" && (
-                                <div className="space-y-2">
-                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
-                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
-                                </div>
-                              )}
-                              {q.type === "True/False" && (
-                                <div className="space-y-2">
-                                  {["True", "False"].map((option, optIdx) => (
-                                    <div key={optIdx} className="flex items-center space-x-2">
-                                      <Checkbox
-                                        id={`hist-q${qIdx}-opt${optIdx}`}
-                                        checked={q.userAnswer === option}
-                                        disabled
-                                      />
-                                      <label
-                                        htmlFor={`hist-q${qIdx}-opt${optIdx}`}
-                                        className="text-sm"
-                                      >
-                                        {option}
-                                      </label>
-                                    </div>
-                                  ))}
-                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
-                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
-                                </div>
-                              )}
-                              {q.type === "Multiple Choice" && (
-                                <div className="space-y-2 mt-2">
-                                  <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
-                                  <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+              {firestoreError ? (
+                <div className="text-red-500 text-center">
+                  <p>{firestoreError}</p>
+                  <p>Please create the index and refresh the page.</p>
                 </div>
-              </div>
+              ) : (
+                <div className={cn("rounded-xl shadow-sm overflow-hidden transition-colors duration-300", theme === "light" ? "bg-white" : "bg-gray-800")}>
+                  <div className="divide-y">
+                    {quizHistory.map((quiz, idx) => (
+                      <div key={idx} className={cn("p-4", theme === "light" ? "hover:bg-slate-50" : "hover:bg-gray-700")}>
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <h3 className="font-medium">{quiz.fileName} Quiz</h3>
+                            <p className="text-sm">{quiz.questions.length} questions</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm">{new Date(quiz.submittedAt).toLocaleDateString()}</p>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setViewingQuiz(quiz)}
+                            >
+                              View Your Quiz
+                            </Button>
+                          </div>
+                        </div>
+                        {viewingQuiz && viewingQuiz.id === quiz.id && (
+                          <div className="mt-4 space-y-4">
+                            <h4 className="text-lg font-semibold">Quiz Results</h4>
+                            {quiz.questions.map((q: any, qIdx: number) => (
+                              <div key={qIdx} className={cn("p-4 rounded-lg transition-colors duration-300", theme === "light" ? "bg-gray-50" : "bg-gray-700")}>
+                                <p className="text-sm mb-2">
+                                  {qIdx + 1}. {q.questionText} ({q.type})
+                                </p>
+                                {q.type === "Multiple Choice" && (
+                                  <div className="space-y-2">
+                                    {q.options.map((option: string, optIdx: number) => (
+                                      <div key={optIdx} className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id={`hist-q${qIdx}-opt${optIdx}`}
+                                          checked={q.userAnswer === option}
+                                          disabled
+                                        />
+                                        <label
+                                          htmlFor={`hist-q${qIdx}-opt${optIdx}`}
+                                          className="text-sm"
+                                        >
+                                          {option}
+                                        </label>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {q.type === "Fill in the Blank" && (
+                                  <div className="space-y-2">
+                                    <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
+                                    <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                  </div>
+                                )}
+                                {q.type === "True/False" && (
+                                  <div className="space-y-2">
+                                    {["True", "False"].map((option, optIdx) => (
+                                      <div key={optIdx} className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id={`hist-q${qIdx}-opt${optIdx}`}
+                                          checked={q.userAnswer === option}
+                                          disabled
+                                        />
+                                        <label
+                                          htmlFor={`hist-q${qIdx}-opt${optIdx}`}
+                                          className="text-sm"
+                                        >
+                                          {option}
+                                        </label>
+                                      </div>
+                                    ))}
+                                    <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
+                                    <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                  </div>
+                                )}
+                                {q.type === "Multiple Choice" && (
+                                  <div className="space-y-2 mt-2">
+                                    <p className="text-sm">Your answer: <span className={q.isCorrect ? "" : "text-red-500"}>{q.userAnswer}</span></p>
+                                    <p className="text-sm text-green-500">Correct answer: {q.correctAnswer}</p>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

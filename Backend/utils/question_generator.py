@@ -6,7 +6,6 @@ from firebase_config import db
 from firebase_admin import firestore
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 

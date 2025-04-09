@@ -7,14 +7,12 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import logging
 
-# Initialize Firebase
 if not firebase_admin._apps:
     cred = credentials.Certificate("firebase.json")
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-# Setup Flask app
 app = Flask(__name__, static_folder='out', static_url_path='/')
 CORS(app)
 
@@ -23,11 +21,9 @@ UPLOAD_FOLDER = './uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Serve frontend
 @app.route('/')
 def serve_index():
     return send_from_directory(app.static_folder, 'index.html')
@@ -68,7 +64,7 @@ def generate_questions_endpoint():
         question_type = request.form.get("questionType", "Multiple Choice")
         difficulty = request.form.get("difficulty", "Medium")
         num_questions = request.form.get("numQuestions", "10")
-        user_id = request.form.get("userId", "dummy_user_id")
+        user_id = request.form.get("userId", "")
         file_id = file.filename
 
         result, status_code = generate_questions(text, user_id, file_id, question_type, difficulty, num_questions)
@@ -88,8 +84,8 @@ def create_flashcard():
     data = request.json
     front = data.get("front")
     back = data.get("back")
-    user_id = data.get("userId", "dummy_user_id")
-    file_id = data.get("fileId", "dummy_file_id")
+    user_id = data.get("userId", "")
+    file_id = data.get("fileId", "")
 
     if not front or not back:
         return jsonify({"error": "Front and Back are required"}), 400
