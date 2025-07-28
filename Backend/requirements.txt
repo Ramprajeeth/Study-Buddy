@@ -1,0 +1,5 @@
+Flask
+requests
+pyPDF2
+firebase-admin
+jsonify
